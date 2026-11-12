@@ -151,6 +151,23 @@ mark.search-hit {
   flex-direction: column;
 }
 
+/* Плитка термина в результатах поиска: заметно отличается от карточки
+   кода, чтобы словарь не путался с фрагментами кода. */
+.term-tile {
+  border-left: 3px solid rgba(255, 190, 92, 0.7);
+}
+
+html[data-theme="light"] .term-tile {
+  border-left-color: #e0a030;
+}
+
+.term-tile pre {
+  margin: 0;
+  max-height: 96px;
+  overflow: hidden;
+  opacity: 0.9;
+}
+
 .card-tile pre {
   margin: 0;
   overflow: hidden;

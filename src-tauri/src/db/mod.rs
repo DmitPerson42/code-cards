@@ -214,6 +214,96 @@ pub fn now_iso() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Индекс словаря терминов
+// ---------------------------------------------------------------------------
+//
+// Устройство такое же, как у card_search: таблица FTS5 без содержимого
+// (content=''), строку снимаем командой 'delete' с прежними значениями
+// колонок. Поэтому и вставка, и удаление берут значения из таблицы terms.
+
+/// Две поисковые колонки термина в порядке схемы FTS.
+pub struct TermFtsRow {
+    pub term: String,
+    pub meaning: String,
+}
+
+/// Собирает поисковую строку термина из таблицы terms.
+pub fn collect_term_fts_row(conn: &Connection, term_id: i64) -> Result<TermFtsRow, String> {
+    let (term, meaning): (String, String) = conn
+        .query_row(
+            "SELECT term, meaning FROM terms WHERE id = ?1",
+            [term_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("термин {term_id} для индекса: {e}"))?;
+    Ok(TermFtsRow { term, meaning })
+}
+
+/// Удаляет строку термина из индекса словаря.
+pub fn delete_term_fts_row(conn: &Connection, term_id: i64) -> Result<(), String> {
+    let indexed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM term_search WHERE rowid = ?1)",
+            [term_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("проверка строки словаря: {e}"))?;
+    if !indexed {
+        return Ok(());
+    }
+    let row = collect_term_fts_row(conn, term_id)?;
+    conn.execute(
+        "INSERT INTO term_search (term_search, rowid, term, meaning)
+         VALUES ('delete', ?1, ?2, ?3)",
+        rusqlite::params![term_id, row.term, row.meaning],
+    )
+    .map_err(|e| format!("удаление из словаря: {e}"))?;
+    Ok(())
+}
+
+/// Пишет строку термина в индекс. Вызывать только когда строки ещё нет.
+pub fn insert_term_fts_row(conn: &Connection, term_id: i64) -> Result<(), String> {
+    let row = collect_term_fts_row(conn, term_id)?;
+    conn.execute(
+        "INSERT INTO term_search (rowid, term, meaning) VALUES (?1, ?2, ?3)",
+        rusqlite::params![term_id, row.term, row.meaning],
+    )
+    .map_err(|e| format!("вставка в словарь: {e}"))?;
+    Ok(())
+}
+
+/// Пересобирает строку термина в индексе словаря.
+///
+/// Внимание: 'rebuild' у contentless-таблицы запрещён, а 'delete' после
+/// UPDATE сверяет уже другой текст и молча ничего не снимает. Правку записи
+/// словаря делайте в порядке: `delete_term_fts_row`, затем UPDATE, затем
+/// `insert_term_fts_row` (так и сделано в `commands::terms`).
+pub fn rebuild_term_fts(conn: &Connection, term_id: i64) -> Result<(), String> {
+    delete_term_fts_row(conn, term_id)?;
+    insert_term_fts_row(conn, term_id)?;
+    Ok(())
+}
+
+/// Полная пересборка индекса словаря: нужна после миграции и импорта.
+pub fn rebuild_all_term_fts(conn: &Connection) -> Result<(), String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM terms ORDER BY id")
+            .map_err(|e| format!("термины для пересборки: {e}"))?;
+        let rows: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("термины для пересборки: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+    for term_id in ids {
+        rebuild_term_fts(conn, term_id)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

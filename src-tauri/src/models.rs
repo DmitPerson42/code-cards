@@ -178,6 +178,9 @@ pub struct Stats {
     pub slots: i64,
     pub tags: i64,
     pub collections: i64,
+    /// Термины словаря.
+    #[serde(default)]
+    pub terms: i64,
 }
 
 /// Отчёт об импорте архива.
@@ -192,6 +195,24 @@ pub struct ImportReport {
     pub collections: i64,
     /// Карточки, которые пришлось создать заново из-за совпадения id.
     pub recreated: i64,
+    /// Термины словаря: новые и обновлённые.
+    #[serde(default)]
+    pub terms: i64,
+}
+
+/// Термин словаря: короткая запись и её значение.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Term {
+    #[serde(default)]
+    pub id: Option<i64>,
+    pub term: String,
+    #[serde(default)]
+    pub meaning: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[cfg(test)]

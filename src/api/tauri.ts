@@ -348,6 +348,8 @@ export interface Stats {
   slots: number;
   tags: number;
   collections: number;
+  /** Термины словаря. */
+  terms: number;
 }
 
 /** Отчёт об импорте. recreated - карточки, созданные заново из-за совпадения id. */
@@ -359,6 +361,8 @@ export interface ImportReport {
   tags: number;
   collections: number;
   recreated: number;
+  /** Импортированные и обновлённые термины словаря. */
+  terms: number;
 }
 
 /** Ручная копия базы. Возвращает путь к созданному файлу копии. */

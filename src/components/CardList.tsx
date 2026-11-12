@@ -16,12 +16,19 @@ import {
   Typography,
   type InputRef,
 } from "antd";
-import { LoadingOutlined, PlusOutlined, StarFilled, StarOutlined } from "@ant-design/icons";
+import {
+  BookOutlined,
+  LoadingOutlined,
+  PlusOutlined,
+  StarFilled,
+  StarOutlined,
+} from "@ant-design/icons";
 import { errorText, type CardSort, type CardSummary, type Filter } from "../api/tauri";
 import { useCards, useSearch, useToggleFavorite } from "../hooks/useCards";
 import { useCollections, useSetCollectionCards } from "../hooks/useCollections";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useTags } from "../hooks/useTags";
+import { useTermSearch } from "../hooks/useTerms";
 import { MONO_FONT } from "../theme/antdTheme";
 import { HighlightedText } from "../utils/highlight";
 import AddToCollection from "./AddToCollection";
@@ -29,7 +36,9 @@ import CollectionTree, { CARD_DRAG_TYPE } from "./CollectionTree";
 
 // Экран списка карточек (раздел 3.4 плана): живой поиск с подсветкой,
 // панель тегов со счётчиками, фильтры и сортировка.
-// Панель подборок подключается на этапе 5.
+// Поиск общий для карточек и словаря: термины показываются первой строкой,
+// а термин, совпавший только по значению, - одной компактной строкой ниже,
+// чтобы не спорить с карточками за место.
 
 const SORT_OPTIONS: ReadonlyArray<{ value: CardSort; label: string }> = [
   { value: "recent", label: "Недавние" },
@@ -54,6 +63,8 @@ const LANGUAGE_OPTIONS = [
 export interface CardListProps {
   onOpen: (id: number) => void;
   onCreate: () => void;
+  /** Переход в словарь с текущим запросом: для "все результаты в словаре". */
+  onOpenDictionary: (query: string) => void;
 }
 
 /** Первые строки превью: в плитке помещается 3-4 строки кода. */
@@ -62,7 +73,7 @@ function previewLines(code: string, limit = 4): string {
   return lines.join("\n");
 }
 
-export default function CardList({ onOpen, onCreate }: CardListProps) {
+export default function CardList({ onOpen, onCreate, onOpenDictionary }: CardListProps) {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const [sort, setSort] = useState<CardSort>("recent");
@@ -88,6 +99,8 @@ export default function CardList({ onOpen, onCreate }: CardListProps) {
   };
   const cards = useCards(filter);
   const searchQuery = useSearch(debouncedQuery, filter);
+  // Поиск по словарю идёт тем же запросом, что и по карточкам.
+  const termSearch = useTermSearch(debouncedQuery);
   // Один источник данных для разметки: поиск, когда есть запрос, иначе список.
   const active = searching ? searchQuery : cards;
   const tags = useTags();
@@ -211,7 +224,7 @@ export default function CardList({ onOpen, onCreate }: CardListProps) {
               ref={searchInputRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Поиск по названию, коду, тегам и разбору (Ctrl+F)"
+              placeholder="Поиск по карточкам и словарю (Ctrl+F)"
               allowClear
               style={{ width: 320 }}
               suffix={
@@ -270,11 +283,19 @@ export default function CardList({ onOpen, onCreate }: CardListProps) {
           </Empty>
         )}
 
+        {/* Словарь: термины, совпавшие с запросом. Карточки идут после них,
+            потому что термин на экране один-два, а карточек может быть много. */}
+        {searching && <TermStrip query={debouncedQuery} onOpenDictionary={onOpenDictionary} />}
+
         {active.isSuccess && active.data.length === 0 && searching && (
           <Empty
             description={
               <Space direction="vertical" size={4}>
-                <Typography.Text strong>Ничего не найдено</Typography.Text>
+                <Typography.Text strong>
+                  {(termSearch.data?.length ?? 0) > 0
+                    ? "Среди карточек ничего не найдено"
+                    : "Ничего не найдено"}
+                </Typography.Text>
                 <Typography.Text type="secondary">
                   Поиск точный: опечатки не исправляются, слова находятся по началу,
                   а символы вроде arr[0] ищутся без пробелов внутри.
@@ -282,7 +303,14 @@ export default function CardList({ onOpen, onCreate }: CardListProps) {
               </Space>
             }
           >
-            <Button onClick={() => setQuery("")}>Очистить поиск</Button>
+            <Space>
+              <Button onClick={() => setQuery("")}>Очистить поиск</Button>
+              {(termSearch.data?.length ?? 0) > 0 && (
+                <Button icon={<BookOutlined />} onClick={() => onOpenDictionary(debouncedQuery)}>
+                  Открыть словарь
+                </Button>
+              )}
+            </Space>
           </Empty>
         )}
 
@@ -421,6 +449,85 @@ export default function CardList({ onOpen, onCreate }: CardListProps) {
         )}
       </div>
       </Flex>
+    </Flex>
+  );
+}
+
+/**
+ * Термины словаря в результатах общего поиска.
+ *
+ * Термин, совпавший по названию, показывается отдельной карточкой:
+ * это ровно то, что искали. Термин, совпавший только по значению,
+ * сжимается до одной строки и идёт общим списком в конце: так карточки
+ * не теряются среди словарных статей.
+ */
+function TermStrip({
+  query,
+  onOpenDictionary,
+}: {
+  query: string;
+  onOpenDictionary: (query: string) => void;
+}) {
+  const termSearch = useTermSearch(query);
+  const screens = Grid.useBreakpoint();
+  const strong = (termSearch.data ?? []).filter((hit) => !hit.crumb);
+  const crumbs = (termSearch.data ?? []).filter((hit) => hit.crumb);
+
+  if (termSearch.isPending) {
+    return null;
+  }
+  if (strong.length === 0 && crumbs.length === 0) {
+    return null;
+  }
+
+  return (
+    <Flex vertical gap={8} style={{ marginBottom: 16 }}>
+      {strong.length > 0 && (
+        <Flex wrap gap={16} align="stretch">
+          {strong.map((hit) => (
+            <Card
+              key={hit.id}
+              className="card-tile term-tile"
+              style={{ width: screens.xl ? 340 : 300 }}
+              hoverable
+              onClick={() => onOpenDictionary(hit.term)}
+              title={
+                <Space size={6}>
+                  <BookOutlined />
+                  <Typography.Text strong>
+                    <HighlightedText text={hit.term} query={query} />
+                  </Typography.Text>
+                </Space>
+              }
+            >
+              <pre className="code-surface search-snippet" style={{ fontSize: 12 }}>
+                <HighlightedText text={hit.snippet} query={query} />
+              </pre>
+            </Card>
+          ))}
+        </Flex>
+      )}
+
+      {crumbs.length > 0 && (
+        <Card size="small" bodyStyle={{ padding: "6px 10px" }}>
+          <Flex vertical gap={4}>
+            <Space size={6}>
+              <BookOutlined />
+              <Typography.Text type="secondary">Встречается в словаре</Typography.Text>
+            </Space>
+            {crumbs.map((hit) => (
+              <Flex key={hit.id} gap={8} align="baseline" wrap>
+                <Typography.Link onClick={() => onOpenDictionary(hit.term)}>
+                  {hit.term}
+                </Typography.Link>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <HighlightedText text={hit.snippet} query={query} />
+                </Typography.Text>
+              </Flex>
+            ))}
+          </Flex>
+        </Card>
+      )}
     </Flex>
   );
 }

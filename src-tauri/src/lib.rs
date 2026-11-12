@@ -308,6 +308,49 @@ fn slots_set(
     crate::slots::slots_set_impl(&conn, block_id, &slots)
 }
 
+// ---------------------------------------------------------------------------
+// Словарь терминов
+// ---------------------------------------------------------------------------
+
+/// Список терминов. query = null отдаёт весь словарь по алфавиту,
+/// иначе фильтр по введённому тексту (подстрока в термине или значении).
+#[tauri::command]
+fn terms_list(
+    state: State<'_, AppState>,
+    query: Option<String>,
+) -> Result<Vec<crate::models::Term>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    commands::terms::terms_list_impl(&conn, query)
+}
+
+/// Создаёт или обновляет термин. Повторяющийся термин отклоняется.
+#[tauri::command]
+fn term_save(
+    state: State<'_, AppState>,
+    id: Option<i64>,
+    term: String,
+    meaning: String,
+) -> Result<i64, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    commands::terms::term_save_impl(&conn, id, &term, &meaning)
+}
+
+#[tauri::command]
+fn term_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    commands::terms::term_delete_impl(&conn, id)
+}
+
+/// Поиск по словарю тем же запросом, что и по карточкам.
+#[tauri::command]
+fn search_terms(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<commands::terms::TermHit>, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    commands::terms::search_terms_impl(&conn, &query)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir_path = match data_dir() {
@@ -370,7 +413,11 @@ pub fn run() {
             backup_run,
             backup_export_json,
             backup_import_json,
-            backup_export_markdown
+            backup_export_markdown,
+            terms_list,
+            term_save,
+            term_delete,
+            search_terms
         ])
         .setup(|app| {
             // Окно уже создано из конфигурации, здесь только проверка доступности главного окна.

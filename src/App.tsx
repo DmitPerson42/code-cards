@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Flex, Layout, Space, Tooltip, Typography } from "antd";
-import { SettingOutlined } from "@ant-design/icons";
+import { Alert, Button, Flex, Layout, Space, Tabs, Tooltip, Typography } from "antd";
+import { BookOutlined, ProfileOutlined, SettingOutlined } from "@ant-design/icons";
 import { useCard } from "./hooks/useCards";
 import type { ThemeMode } from "./hooks/useTheme";
 import { errorText, type CardDetail } from "./api/tauri";
 import CardList from "./components/CardList";
 import CardEditor, { emptyCard } from "./components/CardEditor";
 import CardView from "./components/CardView";
+import Dictionary from "./components/Dictionary";
 import Settings from "./components/Settings";
 
-// Экран приложения: список карточек, просмотр, редактор и настройки.
+// Экран приложения: список карточек, просмотр, редактор, словарь и настройки.
 // Горячие клавиши раздела 3.7 обслуживаются здесь, потому что им нужен
 // доступ к текущему экрану: Ctrl+N, Ctrl+F, Ctrl+S, Esc, Ctrl+Shift+C.
+
+/** Вкладка верхнего уровня: карточки и словарь. */
+export type AppTab = "cards" | "dictionary";
 
 type Screen =
   | { name: "list" }
@@ -24,8 +28,12 @@ export interface AppProps {
 }
 
 export default function App({ themeMode, onThemeModeChange }: AppProps) {
+  const [tab, setTab] = useState<AppTab>("cards");
   const [screen, setScreen] = useState<Screen>({ name: "list" });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Запрос из общего поиска, который передаётся в словарь при переходе
+  // по найденному термину: пользователь должен увидеть ту же строку.
+  const [dictionaryQuery, setDictionaryQuery] = useState("");
 
   // Запрос карточки нужен на двух экранах: просмотр и правка. Раньше id
   // брался только для просмотра, и редактор оставался с card.data = null:
@@ -50,6 +58,13 @@ export default function App({ themeMode, onThemeModeChange }: AppProps) {
   const editCard = useCallback((id: number | null) => setScreen({ name: "edit", id }), []);
   // После сохранения открываем карточку по id, который вернула команда.
   const savedCard = useCallback((id: number) => setScreen({ name: "view", id }), []);
+
+  /** Переход в словарь с готовым запросом: так работает результат поиска. */
+  const openDictionary = useCallback((query: string) => {
+    setDictionaryQuery(query);
+    setTab("dictionary");
+    setScreen({ name: "list" });
+  }, []);
 
   const editing: CardDetail | null =
     screen.name === "edit"
@@ -134,9 +149,23 @@ export default function App({ themeMode, onThemeModeChange }: AppProps) {
           <Typography.Title level={4} style={{ margin: 0 }}>
             Code Cards
           </Typography.Title>
-          <Typography.Text type="secondary">
-            Локальная библиотека фрагментов кода
-          </Typography.Text>
+          <Tabs
+            activeKey={tab}
+            onChange={(key) => {
+              const next = key as AppTab;
+              setTab(next);
+              if (next === "cards") {
+                setScreen({ name: "list" });
+              }
+            }}
+            items={[
+              { key: "cards", label: "Карточки", icon: <ProfileOutlined /> },
+              { key: "dictionary", label: "Словарь", icon: <BookOutlined /> },
+            ]}
+            // Шапка и так плотная: строка подчёркивания вкладок не нужна.
+            tabBarStyle={{ marginBottom: 0, borderBottom: "none" }}
+            style={{ marginBottom: -8 }}
+          />
         </Space>
         <Space size={12}>
           {copyNotice !== null && (
@@ -156,9 +185,17 @@ export default function App({ themeMode, onThemeModeChange }: AppProps) {
       {/* app-content включает вертикальную прокрутку: длинный редактор
           должен прокручиваться до слотов блока, а не обрезаться окном. */}
       <Layout.Content className="app-content" style={{ padding: 24, minHeight: 0 }}>
-        {screen.name === "list" && <CardList onOpen={openCard} onCreate={createCard} />}
+        {tab === "dictionary" && <Dictionary initialQuery={dictionaryQuery} />}
 
-        {screen.name === "view" &&
+        {tab === "cards" && screen.name === "list" && (
+          <CardList
+            onOpen={openCard}
+            onCreate={createCard}
+            onOpenDictionary={openDictionary}
+          />
+        )}
+
+        {tab === "cards" && screen.name === "view" &&
           (card.isError ? (
             <Flex vertical gap={16}>
               <Alert
@@ -179,7 +216,7 @@ export default function App({ themeMode, onThemeModeChange }: AppProps) {
             />
           ))}
 
-        {screen.name === "edit" &&
+        {tab === "cards" && screen.name === "edit" &&
           (card.isError ? (
             <Flex vertical gap={16}>
               <Alert

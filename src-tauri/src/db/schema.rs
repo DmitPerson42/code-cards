@@ -2,11 +2,15 @@
 //
 // Версия схемы хранится в таблице schema_meta. Миграции только вперёд:
 // каждый шаг применяется один раз и переводит версию на единицу выше.
+//
+// Версия 2 добавила словарь терминов: по просьбе пользователя поиск ищет
+// не только по карточкам, но и по словарю. Остальные таблицы версии 1
+// не менялись.
 
 use rusqlite::Connection;
 
 /// Текущая версия схемы, которую понимает этот код.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Полный SQL первой версии схемы.
 const SCHEMA_V1: &str = r#"
@@ -98,6 +102,31 @@ CREATE INDEX IF NOT EXISTS idx_line_notes_block ON line_notes(block_id, line_fro
 CREATE INDEX IF NOT EXISTS idx_collection_cards_card ON collection_cards(card_id);
 "#;
 
+/// Вторая версия схемы: словарь терминов.
+///
+/// Термин - короткая запись (как правило, одно слово), значение - свободный текст.
+/// Отдельная таблица, а не карточка: у термина нет блоков кода и разбора,
+/// а поиск по словарю показывается в интерфейсе отдельной группой.
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS terms (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    term        TEXT NOT NULL,
+    meaning     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- Регистронезависимый поиск точного термина: подсказка о совпадении
+CREATE UNIQUE INDEX IF NOT EXISTS idx_terms_term ON terms(term COLLATE NOCASE);
+
+-- Поиск по словарю (FTS5). Таблица без содержимого, как и card_search:
+-- строку индекса снимаем командой 'delete' с прежними значениями колонок.
+CREATE VIRTUAL TABLE IF NOT EXISTS term_search USING fts5(
+    term, meaning,
+    content='', tokenize='unicode61 remove_diacritics 2'
+);
+"#;
+
 /// Применяет миграции к открытому соединению.
 /// Возвращает версию схемы после применения.
 pub fn migrate(conn: &Connection) -> Result<i32, String> {
@@ -106,32 +135,51 @@ pub fn migrate(conn: &Connection) -> Result<i32, String> {
     )
     .map_err(|e| format!("не удалось создать schema_meta: {e}"))?;
 
-    let current: Option<String> = conn
+    let current_version: i32 = read_version(conn)?;
+
+    // Шаг 1: таблицы карточек, блоков, разбора, слотов, тегов и подборок.
+    if current_version < 1 {
+        conn.execute_batch(SCHEMA_V1)
+            .map_err(|e| format!("не удалось применить схему версии 1: {e}"))?;
+        set_version(conn, 1)?;
+    }
+
+    // Шаг 2: словарь терминов. Применяется и к новой базе (она уже на
+    // версии 1 после шага выше), и к базе пользователя, созданной раньше.
+    let version_after_v1: i32 = read_version(conn)?;
+    if version_after_v1 < 2 {
+        conn.execute_batch(SCHEMA_V2)
+            .map_err(|e| format!("не удалось применить схему версии 2: {e}"))?;
+        // Если термины уже есть (база пришла из импорта), они попадают в индекс.
+        crate::db::rebuild_all_term_fts(conn)?;
+        set_version(conn, 2)?;
+    }
+
+    // Будущие миграции добавляются здесь шагами: if current_version < 3 { ... }
+    read_version(conn)
+}
+
+/// Читает версию схемы из schema_meta. Нет записи - версия 0.
+fn read_version(conn: &Connection) -> Result<i32, String> {
+    let value: Option<String> = conn
         .query_row(
             "SELECT value FROM schema_meta WHERE key = 'version'",
             [],
             |row| row.get(0),
         )
         .ok();
-    let current_version: i32 = current
-        .as_deref()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    Ok(value.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
 
-    if current_version == 0 {
-        conn.execute_batch(SCHEMA_V1)
-            .map_err(|e| format!("не удалось применить схему версии 1: {e}"))?;
-        conn.execute(
-            "INSERT INTO schema_meta (key, value) VALUES ('version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [SCHEMA_VERSION.to_string()],
-        )
-        .map_err(|e| format!("не удалось записать версию схемы: {e}"))?;
-        return Ok(SCHEMA_VERSION);
-    }
-
-    // Будущие миграции добавляются здесь шагами: if current_version < 2 { ... }
-    Ok(current_version)
+/// Записывает версию схемы.
+fn set_version(conn: &Connection, version: i32) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO schema_meta (key, value) VALUES ('version', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [version.to_string()],
+    )
+    .map_err(|e| format!("не удалось записать версию схемы: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -141,9 +189,11 @@ mod tests {
     #[test]
     fn migrate_creates_schema_and_is_idempotent() {
         let conn = Connection::open_in_memory().expect("память");
-        assert_eq!(migrate(&conn).expect("первая миграция"), 1);
+        // Свежая база сразу получает последнюю версию: 2 (словарь терминов)
+        assert_eq!(migrate(&conn).expect("первая миграция"), SCHEMA_VERSION);
         // Повторный вызов ничего не ломает и не пересоздаёт таблицы
-        assert_eq!(migrate(&conn).expect("вторая миграция"), 1);
+        assert_eq!(migrate(&conn).expect("вторая миграция"), SCHEMA_VERSION);
+        assert_eq!(read_version(&conn).unwrap(), SCHEMA_VERSION);
 
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -165,6 +215,57 @@ mod tests {
             assert!(tables.contains(&expected.to_string()), "нет таблицы {expected}");
         }
         assert!(tables.contains(&"card_search".to_string()), "нет FTS-таблицы");
+        // Версия 2: словарь терминов
+        assert!(tables.contains(&"terms".to_string()), "нет таблицы терминов");
+        assert!(tables.contains(&"term_search".to_string()), "нет FTS словаря");
+    }
+
+    /// База пользователя, созданная на версии 1, получает словарь без потерь.
+    #[test]
+    fn upgrade_from_version_one_adds_dictionary() {
+        let conn = Connection::open_in_memory().expect("память");
+        // Состояние базы до словаря: только первая версия схемы
+        conn.execute_batch("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        set_version(&conn, 1).unwrap();
+        let now = "2026-11-12T10:00:00.000";
+        conn.execute(
+            "INSERT INTO cards (id, title, created_at, updated_at) VALUES (1, 'Старая', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&conn).expect("обновление"), 2);
+        // Карточка на месте
+        let title: String = conn
+            .query_row("SELECT title FROM cards WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "Старая");
+        // Словарь готов к работе
+        conn.execute(
+            "INSERT INTO terms (term, meaning, created_at, updated_at) VALUES ('FTS', 'поиск', ?1, ?1)",
+            [now],
+        )
+        .expect("вставка термина");
+    }
+
+    /// Повторный запуск не пересоздаёт таблицы и не меняет версию.
+    #[test]
+    fn migrate_twice_keeps_version_two() {
+        let conn = Connection::open_in_memory().expect("память");
+        assert_eq!(migrate(&conn).unwrap(), 2);
+        let now = "2026-11-12T10:00:00.000";
+        conn.execute(
+            "INSERT INTO terms (term, meaning, created_at, updated_at) VALUES ('слот', 'параметр', ?1, ?1)",
+            [now],
+        )
+        .unwrap();
+        assert_eq!(migrate(&conn).unwrap(), 2);
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM terms", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "термин не должен пропасть при повторной миграции");
     }
 
     #[test]

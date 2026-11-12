@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::models::{ImportReport, Stats};
@@ -89,6 +89,18 @@ pub struct Archive {
     pub tags: Vec<ArchiveTag>,
     #[serde(default)]
     pub collections: Vec<ArchiveCollection>,
+    /// Словарь терминов. В архивах первой версии поля нет: default = пусто.
+    #[serde(default)]
+    pub terms: Vec<ArchiveTerm>,
+}
+
+/// Термин в архиве: те же поля, что видит пользователь.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveTerm {
+    pub term: String,
+    #[serde(default)]
+    pub meaning: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,7 +286,26 @@ pub fn build_archive(conn: &Connection) -> Result<Archive, String> {
         cards,
         tags,
         collections,
+        terms: build_archive_terms(conn)?,
     })
+}
+
+/// Термины словаря в алфавитном порядке для архива.
+fn build_archive_terms(conn: &Connection) -> Result<Vec<ArchiveTerm>, String> {
+    let mut stmt = conn
+        .prepare("SELECT term, meaning FROM terms ORDER BY term COLLATE NOCASE")
+        .map_err(|e| format!("термины для архива: {e}"))?;
+    let terms: Vec<ArchiveTerm> = stmt
+        .query_map([], |row| {
+            Ok(ArchiveTerm {
+                term: row.get(0)?,
+                meaning: row.get(1)?,
+            })
+        })
+        .map_err(|e| format!("термины для архива: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(terms)
 }
 
 /// Экспортирует архив в файл JSON. Возвращает статистику.
@@ -297,6 +328,7 @@ pub fn export_json(conn: &Connection, path: &Path) -> Result<Stats, String> {
             .sum::<usize>() as i64,
         tags: archive.tags.len() as i64,
         collections: archive.collections.len() as i64,
+        terms: archive.terms.len() as i64,
     };
     let text = serde_json::to_string_pretty(&archive)
         .map_err(|e| format!("не удалось собрать JSON: {e}"))?;
@@ -393,6 +425,25 @@ pub fn import_json(conn: &mut Connection, path: &Path) -> Result<ImportReport, S
         report.blocks += detail.blocks.len() as i64;
         report.notes += detail.blocks.iter().map(|b| b.notes.len()).sum::<usize>() as i64;
         report.slots += detail.blocks.iter().map(|b| b.slots.len()).sum::<usize>() as i64;
+    }
+
+    // Словарь терминов: термин уникален без учёта регистра. Существующее
+    // написание переиспользуется, значение из архива обновляет его.
+    for item in &archive.terms {
+        let term = match crate::commands::terms::normalize_term(&item.term) {
+            Some(term) => term,
+            None => continue,
+        };
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM terms WHERE term = ?1 COLLATE NOCASE",
+                [&term],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("импорт термина: {e}"))?;
+        crate::commands::terms::term_save_impl(&tx, existing, &term, &item.meaning)?;
+        report.terms += 1;
     }
 
     // Подборки: сначала родители, потом дети
@@ -553,10 +604,14 @@ mod tests {
     fn json_roundtrip_loses_nothing() {
         let mut conn = db::open_in_memory().unwrap();
         crate::commands::cards::card_save_impl(&mut conn, &sample()).unwrap();
+        // Термин словаря тоже должен пережить экспорт и импорт
+        crate::commands::terms::term_save_impl(&conn, None, "слот", "параметр шаблона").unwrap();
+
         let archive = build_archive(&conn).unwrap();
         assert_eq!(archive.cards.len(), 1);
         assert_eq!(archive.cards[0].blocks[0].notes.len(), 1);
         assert_eq!(archive.cards[0].blocks[0].slots.len(), 1);
+        assert_eq!(archive.terms.len(), 1);
 
         let dir = test_dir("roundtrip");
         let path = dir.join("archive.json");
@@ -564,6 +619,7 @@ mod tests {
         assert_eq!(stats.cards, 1);
         assert_eq!(stats.notes, 1);
         assert_eq!(stats.slots, 1);
+        assert_eq!(stats.terms, 1);
 
         // Импорт в чистую базу
         let mut fresh = db::open_in_memory().unwrap();
@@ -571,10 +627,15 @@ mod tests {
         assert_eq!(report.cards, 1);
         assert_eq!(report.notes, 1);
         assert_eq!(report.slots, 1);
+        assert_eq!(report.terms, 1);
 
         let restored = build_archive(&fresh).unwrap();
         assert_eq!(restored.cards[0].title, "Шаблон");
         assert_eq!(restored.cards[0].blocks[0].slots[0].variants.len(), 2);
+        assert_eq!(restored.terms[0].term, "слот");
+        // Импортированный термин сразу ищется: индекс словаря собран заново
+        let hits = crate::commands::terms::search_terms_impl(&fresh, "параметр").unwrap();
+        assert_eq!(hits.len(), 1, "термин из архива должен попасть в поиск");
 
         std::fs::remove_dir_all(&dir).ok();
     }

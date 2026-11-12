@@ -92,7 +92,10 @@ pub fn parse_query(raw: &str) -> ParsedQuery {
 }
 
 /// Экранирует слово для FTS: кавычки внутри слова удваиваются.
-fn fts_quote(word: &str) -> String {
+///
+/// Функция открыта для словаря терминов: правила экранирования у обеих
+/// таблиц FTS одинаковые, второй копии быть не должно.
+pub fn fts_quote(word: &str) -> String {
     format!("\"{}\"*", word.replace('"', "\"\""))
 }
 

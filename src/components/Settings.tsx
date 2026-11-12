@@ -46,6 +46,7 @@ function reportLines(report: ImportReport): string[] {
     `слотов: ${report.slots}`,
     `тегов: ${report.tags}`,
     `подборок: ${report.collections}`,
+    `терминов словаря: ${report.terms}`,
     `создано заново из-за совпадения id: ${report.recreated}`,
   ];
 }
@@ -92,7 +93,7 @@ export default function Settings({
     try {
       const stats = await backupExportJson(path);
       message.success(
-        `Экспортировано: карточек ${stats.cards}, блоков ${stats.blocks}, тегов ${stats.tags}`,
+        `Экспортировано: карточек ${stats.cards}, блоков ${stats.blocks}, тегов ${stats.tags}, терминов ${stats.terms}`,
       );
     } catch (error) {
       message.error(
@@ -128,6 +129,7 @@ export default function Settings({
             ))}
             <Typography.Text type="secondary">
               Существующие карточки не изменялись: при совпадении id созданы новые.
+              Термины словаря с уже известным названием получили значение из архива.
             </Typography.Text>
           </Flex>
         ),
