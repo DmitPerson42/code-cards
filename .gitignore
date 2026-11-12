@@ -1,0 +1,22 @@
+node_modules/
+dist/
+target/
+
+# База данных и резервные копии: пользовательские данные, в git не идут
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Прочее
+.DS_Store
+*.local
+.vite/
+*.tsbuildinfo
+
+# Служебные каталоги Tauri: восстанавливаются при сборке
+src-tauri/gen/
+
+# Временные каталоги сборки фронтенда (см. scripts/frontend.mjs)
+node_modules/.tmp-build/
+node_modules/.vite-cache/

@@ -1,0 +1,189 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #10131a;
+}
+
+/* Светлая тема включается из настроек (data-theme ставит useThemeMode) */
+html[data-theme="light"] body,
+html[data-theme="light"],
+html[data-theme="light"] #root {
+  background: #f5f6f8;
+}
+
+html[data-theme="light"] .search-snippet {
+  background: rgba(255, 190, 92, 0.16);
+}
+
+html[data-theme="light"] .note-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* Код и разбор всегда моноширинные, с табуляцией в 4 знака */
+.code-surface,
+.notes-surface {
+  font-family: "Cascadia Mono", "Consolas", "JetBrains Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.code-surface .cm-editor {
+  height: 100%;
+}
+
+.code-surface .cm-editor.cm-focused {
+  outline: none;
+}
+
+.code-surface .cm-scroller {
+  line-height: 1.6;
+}
+
+/* Подсветка разобранной строки в коде */
+.cm-line-note-line {
+  background: rgba(90, 170, 255, 0.12);
+}
+
+/* Строка, выбранная пользователем в редакторе разбора */
+.cm-line-note-active {
+  background: rgba(90, 170, 255, 0.28);
+}
+
+/* Подсветка слотов {{...}} в редакторе */
+.cm-slot-mark {
+  background: rgba(255, 190, 92, 0.22);
+  border-bottom: 1px solid rgba(255, 190, 92, 0.65);
+  border-radius: 2px;
+}
+
+/* Полоса слева у устаревших пояснений */
+.note-stale {
+  border-left: 3px solid #e0a030;
+  padding-left: 8px;
+}
+
+.note-item {
+  border-left: 3px solid transparent;
+  padding-left: 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.note-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.note-item-active {
+  background: rgba(90, 170, 255, 0.16);
+  border-left-color: #5aaaff;
+}
+
+/* Совпадения поиска */
+mark.search-hit {
+  background: rgba(255, 190, 92, 0.35);
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
+/* Строка вокруг совпадения в результате поиска */
+.search-snippet {
+  margin: 0;
+  padding: 4px 6px;
+  border-left: 2px solid rgba(255, 190, 92, 0.55);
+  background: rgba(255, 190, 92, 0.06);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Карточки сетки списка */
+.card-tile {
+  cursor: pointer;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.card-tile pre {
+  margin: 0;
+  overflow: hidden;
+  max-height: 84px;
+  opacity: 0.85;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+
+/* Гибкая раскладка экрана карточки: код слева, разбор справа */
+.card-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr);
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+.card-split > * {
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Число в кружке для счётчиков тегов */
+.count-chip {
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Маркер в жёлобе у строк, для которых есть разбор */
+.cm-note-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: rgba(90, 170, 255, 0.85);
+}
+
+/* Маркер у строк с устаревшим разбором */
+.cm-note-dot-stale {
+  background: #e0a030;
+}
+
+/* Панель разбора рядом с кодом: список прокручивается внутри */
+.notes-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* Заголовок записи разбора: диапазон строк и действия */
+.note-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+/* Поля диапазона и текст разбора */
+.note-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  max-width: 180px;
+}
+
