@@ -654,7 +654,14 @@ function BlockPane({
         </Button>
       </Space>
 
-      <div className={view === "split" ? "card-split" : undefined} style={{ maxHeight: "calc(100vh - 330px)" }}>
+      {/* Высота области кода - доля экрана, а не фиксированный вычет:
+          раньше maxHeight обрезал блок и панель разбора, а всё, что ниже
+          (слоты блока), уходило за границу окна. Прокрутку страницы
+          обеспечивает .app-content. */}
+      <div
+        className={view === "split" ? "card-split" : undefined}
+        style={{ maxHeight: "min(60vh, 720px)" }}
+      >
         <div
           style={{
             border: "1px solid rgba(255,255,255,0.12)",

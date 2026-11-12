@@ -296,7 +296,9 @@ function BlockCard({ block, index, copied, onCopy }: BlockCardProps) {
         </Space>
       }
     >
-      <div className="card-split" style={{ maxHeight: "calc(100vh - 300px)" }}>
+      {/* Доля экрана вместо фиксированного вычета: прокрутку страницы
+          обеспечивает .app-content, а область кода не обрезает то, что ниже. */}
+      <div className="card-split" style={{ maxHeight: "min(65vh, 780px)" }}>
         <div
           style={{
             border: "1px solid rgba(255,255,255,0.12)",

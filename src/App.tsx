@@ -153,7 +153,9 @@ export default function App({ themeMode, onThemeModeChange }: AppProps) {
           </Tooltip>
         </Space>
       </Layout.Header>
-      <Layout.Content style={{ padding: 24, minHeight: 0 }}>
+      {/* app-content включает вертикальную прокрутку: длинный редактор
+          должен прокручиваться до слотов блока, а не обрезаться окном. */}
+      <Layout.Content className="app-content" style={{ padding: 24, minHeight: 0 }}>
         {screen.name === "list" && <CardList onOpen={openCard} onCreate={createCard} />}
 
         {screen.name === "view" &&
