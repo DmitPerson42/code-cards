@@ -215,6 +215,187 @@ pub fn now_iso() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Проверка и пересборка индекса карточек
+// ---------------------------------------------------------------------------
+//
+// Зачем это нужно. У contentless-таблицы FTS5 нет своего текста, поэтому
+// строку можно снять только точным повтором значений колонок. Если раньше
+// сохранение падало между правкой данных и снятием строки индекса, старый
+// текст оставался в индексе: карточка новая, поисковые слова старые. Снять
+// такую строку по данным таблиц нельзя, `delete` при этом не ошибается и
+// строку не убирает. Лечится только пересборкой индекса из данных.
+//
+// Проверено на этой сборке SQLite (и потому не используется):
+// - `fts5_token_count()` не зарегистрирована;
+// - таблица `*_docsize` пуста, вектор размеров не пишется;
+// - `'delete'` с пустыми значениями колонок строку не снимает.
+// Поэтому проверка простая: слово из данных обязано находиться в индексе.
+
+/// Как часто и сколько строк проверять при открытии базы.
+///
+/// Полная проверка всех карточек на старте - это много запросов. Проверяется
+/// небольшое окно строк, которого хватает, чтобы заметить расхождение:
+/// расходится обычно не одна карточка, а весь хвост после сбоя.
+const CHECK_BATCH: usize = 40;
+
+/// Проверяет, что слова карточки есть в её строке индекса.
+///
+/// Возвращает id карточек, у которых индекс разошёлся с данными: строка
+/// пропала или содержит старый текст.
+pub fn audit_fts(conn: &Connection) -> Result<Vec<i64>, String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM cards ORDER BY id")
+            .map_err(|e| format!("карточки для проверки: {e}"))?;
+        let rows: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("карточки для проверки: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+
+    let mut problems = Vec::new();
+    for card_id in ids {
+        let row = collect_fts_row(conn, card_id)?;
+        if is_indexed(conn, card_id, &row)? {
+            continue;
+        }
+        problems.push(card_id);
+    }
+    Ok(problems)
+}
+
+/// Проверяет последние CHECK_BATCH карточек: быстрая проверка при запуске.
+pub fn audit_fts_recent(conn: &Connection) -> Result<Vec<i64>, String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM cards ORDER BY id DESC LIMIT ?1")
+            .map_err(|e| format!("карточки для проверки: {e}"))?;
+        let rows: Vec<i64> = stmt
+            .query_map([CHECK_BATCH as i64], |row| row.get(0))
+            .map_err(|e| format!("карточки для проверки: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+
+    let mut problems = Vec::new();
+    for card_id in ids {
+        let row = collect_fts_row(conn, card_id)?;
+        if is_indexed(conn, card_id, &row)? {
+            continue;
+        }
+        problems.push(card_id);
+    }
+    Ok(problems)
+}
+
+/// Находятся ли слова карточки в её строке индекса.
+///
+/// Проверка идёт по словам, а не по числу токенов: так проверка одинаково
+/// работает и для пустых карточек, и для текстов с пунктуацией.
+fn is_indexed(conn: &Connection, card_id: i64, row: &FtsRow) -> Result<bool, String> {
+    let words = audit_words(row);
+    // Нечего проверять (карточка без текста): считаем, что индекс в порядке,
+    // проверить это всё равно нечем.
+    if words.is_empty() {
+        return Ok(true);
+    }
+    for word in &words {
+        let expr = fts_prefix_expr(word);
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM card_search
+                 WHERE card_search MATCH ?1 AND rowid = ?2",
+                rusqlite::params![expr, card_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if hits == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Слова из текста карточки, которые обязаны быть в индексе.
+///
+/// Берутся первые непустые слова названия, описания, кода и разбора:
+/// они присутствуют в тексте точно, без учёта токенизатора.
+fn audit_words(row: &FtsRow) -> Vec<String> {
+    let mut words = Vec::new();
+    for text in [&row.title, &row.description, &row.code, &row.notes] {
+        for word in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            if word.chars().count() >= 3 && !words.iter().any(|known: &String| known == word) {
+                words.push(word.to_string());
+                if words.len() >= 2 {
+                    return words;
+                }
+            }
+        }
+    }
+    words
+}
+
+/// Выражение FTS для слова: слово целиком, без префикса и хвоста.
+fn fts_prefix_expr(word: &str) -> String {
+    format!("\"{}\"", word.replace('"', "\"\""))
+}
+
+/// Пересобирает индекс карточек, где он разошёлся с данными.
+///
+/// Возвращает число пересобранных карточек. Порядок записи это не
+/// исправляет: пересборка нужна после исправления, чтобы вычистить мусор
+/// от прежних сбоев.
+///
+/// Важная деталь про удаление. FTS5 сверяет значения колонок с индексом
+/// без токенизации, поэтому если в индексе лежало "Старое название", а в
+/// таблице уже "Arkhipelag", `delete` с текущими данными молча ничего не
+/// снимает. Здесь строку снимаем без сверки значений (только по rowid):
+/// для contentless-таблицы этого достаточно, так же сделано у словаря.
+pub fn repair_fts(conn: &Connection) -> Result<usize, String> {
+    let problems = audit_fts(conn)?;
+    if problems.is_empty() {
+        return Ok(0);
+    }
+    // Строку с неверным текстом снять нельзя: `delete` сверяет значения
+    // колонок и молча ничего не делает. Значит собираем индекс заново.
+    force_rebuild_fts(conn)
+}
+
+/// Жёсткая пересборка всего индекса карточек.
+///
+/// Крайняя мера: таблицу сносим и собираем заново из данных. Единственный
+/// надёжный способ убрать строку, текст которой неизвестен.
+pub fn force_rebuild_fts(conn: &Connection) -> Result<usize, String> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM cards ORDER BY id")
+            .map_err(|e| format!("карточки для пересборки: {e}"))?;
+        let rows: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("карточки для пересборки: {e}"))?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+    conn.execute_batch("DROP TABLE IF EXISTS card_search;")
+        .map_err(|e| format!("пересоздание индекса: {e}"))?;
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE card_search USING fts5(
+             title, description, tags, code, notes,
+             content='', tokenize='unicode61 remove_diacritics 2'
+         );",
+    )
+    .map_err(|e| format!("пересоздание индекса: {e}"))?;
+    for card_id in &ids {
+        insert_fts_row(conn, *card_id)?;
+    }
+    Ok(ids.len())
+}
+
+// ---------------------------------------------------------------------------
 // Индекс словаря терминов
 // ---------------------------------------------------------------------------
 //
@@ -370,5 +551,83 @@ mod tests {
             .query_row("SELECT count(*) FROM card_search", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 1);
+    }
+
+    fn seed_card(conn: &Connection, id: i64, title: &str, code: &str) {
+        let now = now_iso();
+        conn.execute(
+            "INSERT INTO cards (id, title, description, created_at, updated_at)
+             VALUES (?1, ?2, '', ?3, ?3)",
+            rusqlite::params![id, title, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO code_blocks (card_id, code) VALUES (?1, ?2)",
+            rusqlite::params![id, code],
+        )
+        .unwrap();
+        rebuild_fts(conn, id).unwrap();
+    }
+
+    #[test]
+    fn audit_accepts_fresh_index() {
+        let conn = open_in_memory().expect("память");
+        seed_card(&conn, 1, "Кэш функций", "@lru_cache(maxsize=None)");
+        seed_card(&conn, 2, "Строки SQL", "SELECT * FROM users;");
+        assert!(audit_fts(&conn).unwrap().is_empty(), "свежий индекс расхождений не имеет");
+        assert!(audit_fts_recent(&conn).unwrap().is_empty());
+    }
+
+    /// Расхождение индекса с данными находится, а пересборка его вылечивает.
+    ///
+    /// Так выглядела база после сбоя прежней версии: данные карточки новые,
+    /// а в индексе остался старый текст. Снять строку в этом состоянии
+    /// нельзя (`delete` сверяет значения колонок и молча ничего не делает),
+    /// поэтому проверка должна находить такое расхождение.
+    #[test]
+    fn stale_index_is_found_and_repaired() {
+        let conn = open_in_memory().expect("память");
+        seed_card(&conn, 1, "Старое название", "def f():\n    return 1");
+        assert!(audit_fts(&conn).unwrap().is_empty());
+
+        // Правим данные в обход индекса: ровно то, что давал старый порядок
+        conn.execute("UPDATE cards SET title = 'Arkhipelag' WHERE id = 1", [])
+            .unwrap();
+        conn.execute("DELETE FROM code_blocks WHERE card_id = 1", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO code_blocks (card_id, code) VALUES (1, 'zebra_symbol()')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            audit_fts(&conn).unwrap(),
+            vec![1],
+            "проверка обязана увидеть устаревшую строку"
+        );
+
+        let rebuilt = repair_fts(&conn).unwrap();
+        assert!(rebuilt >= 1, "пересборка обязана что-то сделать");
+        assert!(audit_fts(&conn).unwrap().is_empty(), "после пересборки расхождений нет");
+
+        // Старые слова ушли, новые находятся
+        let count = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM card_search WHERE card_search MATCH ?1",
+                [query],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+        };
+        assert_eq!(count("\"Старое\""), 0, "старого названия в индексе нет");
+        assert_eq!(count("\"Arkhipelag\""), 1, "новое название найдено");
+        assert_eq!(count("\"zebra_symbol\""), 1, "новый код найден");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM card_search", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "на карточку одна строка"
+        );
     }
 }

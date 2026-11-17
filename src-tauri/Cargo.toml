@@ -5,6 +5,10 @@ description = "Code Cards - локальная библиотека фрагме
 authors = ["Code Cards"]
 edition = "2021"
 rust-version = "1.90"
+# В каталоге два бинарника: окно приложения (src/main.rs) и консольный
+# code-cards-cli для работы с базой. Без default-run сборка установщика
+# падает: "failed to find main binary".
+default-run = "code-cards"
 
 [lib]
 name = "code_cards_lib"

@@ -503,6 +503,17 @@ fn write_card_in_tx(
 
     let card_id = match detail.id {
         Some(id) => {
+            // ВАЖНО ПО ПОРЯДКУ. У таблицы FTS5 без содержимого (content='')
+            // удаление сверяет значения колонок с индексом. Снимать строку
+            // нужно ДО изменений карточки: UPDATE cards сменит title и
+            // description, DELETE FROM code_blocks - code и notes. После
+            // этого collect_fts_row соберёт уже другие значения, и FTS5
+            // ответит "database disk image is malformed" (так падала правка
+            // кода и названия) либо молча оставит старый текст в индексе.
+            // Сюда не годится delete_fts_row_empty: 'delete' с пустыми
+            // значениями не ошибку не даёт, ни строку не снимает - проверено.
+            db::delete_fts_row(tx, id)?;
+
             let updated = tx
                 .execute(
                     "UPDATE cards SET title = ?1, description = ?2, is_template = ?3,
@@ -596,14 +607,8 @@ fn write_card_in_tx(
         }
     }
 
-    // ВАЖНО ПО ПОРЯДКУ. У таблицы FTS5 без содержимого (content='')
-    // удаление требует ровно те значения колонок, что лежат в индексе.
-    // Поэтому строку индекса снимаем ДО изменения карточки: после правки
-    // тегов или кода собранные значения уже не совпадут с индексовыми,
-    // и FTS5 ответит "database disk image is malformed". Так и было
-    // при сохранении карточки с новым тегом.
-    db::delete_fts_row(tx, card_id)?;
-
+    // Строка индекса уже снята: для правки - в начале ветки Some(id),
+    // для новой карточки её и не было. Осталось записать актуальную строку.
     // Теги приходят именами, поэтому пересобираем связи здесь же.
     set_card_tags_tx(&tx, card_id, &detail.tags)?;
 
@@ -845,10 +850,88 @@ mod tests {
         assert_eq!(integrity, "ok", "база не должна считаться повреждённой");
     }
 
+    /// Регрессия: правка существующей карточки, где меняются сами поисковые
+    /// колонки - название, описание, код и разбор.
+    ///
+    /// Тесты по тегам этого не ловили: тег меняет только строку `tags`, а
+    /// `title`, `description`, `code` и `notes` оставались прежними. Стоило
+    /// поправить код или название - и `delete` из индекса собирал уже новые
+    /// значения, FTS5 не находил такой строки и падал с "database disk image
+    /// is malformed". Поэтому здесь меняется всё сразу.
+    #[test]
+    fn editing_title_code_and_notes_does_not_break_fts() {
+        let mut conn = db::open_in_memory().unwrap();
+        let id = card_save_impl(&mut conn, &sample_card("Старое название")).unwrap();
+        assert_eq!(
+            search_impl(&conn, "Старое", &Filter::default()).unwrap().len(),
+            1,
+            "до правки карточка находится по старому названию"
+        );
+
+        // Пользователь правит название, описание, код, разбор и добавляет блок
+        let mut edited = card_get_impl(&conn, id).unwrap();
+        edited.title = "Новое название".into();
+        edited.description = "другое описание про словарь".into();
+        edited.blocks[0].code = "def g():\n    return 2".into();
+        edited.blocks[0].notes = vec![LineNote {
+            id: None,
+            line_from: 1,
+            line_to: 2,
+            text: "вторая функция".into(),
+            is_stale: false,
+            sort_order: 0,
+        }];
+        edited.blocks.push(CodeBlock {
+            id: None,
+            language: "sql".into(),
+            code: "SELECT * FROM terms;".into(),
+            sort_order: 1,
+            notes: vec![],
+            slots: vec![],
+        });
+
+        let saved = card_save_impl(&mut conn, &edited).expect("правка кода не должна падать");
+        assert_eq!(saved, id, "карточка правится, а не создаётся заново");
+
+        // Новые значения находятся, старых в индексе не осталось
+        for (query, why) in [
+            ("Новое", "новое название"),
+            ("словарь", "новое описание"),
+            ("terms", "код нового блока"),
+            ("вторая", "новый текст разбора"),
+        ] {
+            let hits = search_impl(&conn, query, &Filter::default()).unwrap();
+            assert_eq!(hits.len(), 1, "не найдено: {why} (запрос {query})");
+        }
+        for (query, why) in [
+            ("Старое", "прежнее название"),
+            ("return 1", "прежний код"),
+            ("return 2", "код нового блока тоже не должен теряться"),
+        ] {
+            let hits = search_impl(&conn, query, &Filter::default()).unwrap();
+            let expect_hit = query == "return 2";
+            assert_eq!(
+                hits.is_empty(),
+                !expect_hit,
+                "неверный результат: {why} (запрос {query})"
+            );
+        }
+
+        // Индекс по-прежнему в одном экземпляре на карточку
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM card_search", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "на карточку одна строка индекса");
+
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok", "база не должна считаться повреждённой");
+    }
+
     /// То же для нескольких сохранений подряд: индекс не должен разъезжаться.
     #[test]
-    fn repeated_saves_keep_fts_consistent() {
-        let mut conn = db::open_in_memory().unwrap();
+    fn repeated_saves_keep_fts_consistent() {        let mut conn = db::open_in_memory().unwrap();
         let id = card_save_impl(&mut conn, &sample_card("Многократная правка")).unwrap();
         for tag in ["один", "два", "три"] {
             let mut edited = card_get_impl(&conn, id).unwrap();

@@ -383,6 +383,24 @@ pub fn run() {
         }
     }
 
+    // Проверка индекса поиска. Прежняя версия могла оставить в индексе
+    // устаревшие строки (подробности в db::audit_fts). Проверяем последние
+    // карточки и, если что-то разошлось, пересобираем индекс целиком.
+    match db::audit_fts_recent(&conn) {
+        Ok(problems) if problems.is_empty() => {}
+        Ok(problems) => {
+            println!(
+                "[Code Cards] индекс поиска расходится с данными ({} карточек), пересборка",
+                problems.len()
+            );
+            match db::repair_fts(&conn) {
+                Ok(count) => println!("[Code Cards] индекс пересобран: {count} карточек"),
+                Err(e) => eprintln!("[Code Cards] индекс не пересобран: {e}"),
+            }
+        }
+        Err(e) => eprintln!("[Code Cards] проверка индекса не удалась: {e}"),
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
